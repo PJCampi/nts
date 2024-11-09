@@ -3,23 +3,17 @@ import os
 import re
 import sys
 import urllib
-import json
+from pathlib import Path
+from tempfile import gettempdir
 
 import mutagen
 import requests
 import youtube_dl
 from bs4 import BeautifulSoup
 
+from nts.file_builder import build_metadata
 
 __version__ = '1.1.7'
-
-
-# defaults to darwin
-download_dir = '~/Downloads'
-if sys.platform.startswith('win32'):
-    download_dir = '%USERPROFILE\\Downloads\\'
-# expand it
-download_dir = os.path.expanduser('~/Downloads')
 
 
 def download(url, quiet, save_dir, save=True):
@@ -28,89 +22,64 @@ def download(url, quiet, save_dir, save=True):
     bs = BeautifulSoup(page, 'html.parser')
 
     # guessing there is one
-    parsed = parse_nts_data(bs)
-    # safe_title, date, title, artists, parsed_artists, genres, image_url = parse_nts_data(bs)
+    metadata = parse_nts_data(bs)
+
+    # add extra metadata
+    metadata['album'] = 'NTS'
+    metadata['url'] = nts_url
+    metadata['compilation'] = True
+    join_artists = metadata['artists'] + metadata['parsed_artists']
+    all_artists, presence_set = [], set()
+    for aa in join_artists:
+        al = aa.lower()
+        if al not in presence_set:
+            presence_set.add(al)
+            all_artists.append(aa)
+    metadata['all_artists'] = all_artists
+    metadata['name'] = f'{metadata["title"]} - {metadata["date"].day:02d}.{metadata["date"].month:02d}.{metadata["date"].year:02d}'
+    file_name = f'{metadata["safe_title"]} - {metadata["date"].year}-{metadata["date"].month}-{metadata["date"].day}'
 
     button = bs.select('.episode__btn.mixcloud-btn')[0]
     link = button.get('data-src')
-    match = re.match(r'https:\/\/www.mixcloud\.com\/NTSRadio.+$', link)
 
-    # get album art. If the one on mixcloud is available, use it. Otherwise,
-    # fall back to the nts website.
+    # get album art. If the one on mixcloud is available, use it. Otherwise fall back to the nts website.
     page = requests.get(link).content
     bs = BeautifulSoup(page, 'html.parser')
-    image_type = ''
     if len(bs.select('div.album-art')) != 0:
         img = bs.select('div.album-art')[0].img
         srcset = img.get('srcset').split()
         img = srcset[-2].split(',')[1]
         image = urllib.request.urlopen(img)
-        image_type = image.info().get_content_type()
-        image = image.read()
-    elif len(parsed["image_url"]):
-        image = urllib.request.urlopen(parsed["image_url"])
-        image_type = image.info().get_content_type()
-        image = image.read()
-
-    file_name = f'{parsed["safe_title"]} - {parsed["date"].year}-{parsed["date"].month}-{parsed["date"].day}'
+    elif metadata['image_url']:
+        try:
+            image = urllib.request.urlopen(metadata['image_url'])
+        except Exception as e:
+            print(f"failed to get image at: {metadata['image_url']} due to: {repr(e)}")
+            image = None
+    else:
+        image = None
+    metadata['image'] = image
 
     # download
+    tempdir = gettempdir()
     if save:
         if not quiet:
-            print(f'\ndownloading into: {save_dir}\n')
+            print(f'\ndownloading into: {tempdir}\n')
         ydl_opts = {
-            'outtmpl': os.path.join(save_dir, f'{file_name}.%(ext)s'),
+            'outtmpl': os.path.join(tempdir, f'{file_name}.%(ext)s'),
             'quiet': quiet
         }
         with youtube_dl.YoutubeDL(ydl_opts) as ydl:
             ydl.download([link])
 
         # get the downloaded file
-        files = os.listdir(save_dir)
-        for file in files:
-            if file.startswith(file_name):
-                # found
-                if not quiet:
-                    print(f'adding metadata to {file} ...')
-                audio = mutagen.File(os.path.join(save_dir, file))
-                # title
-                audio['\xa9nam'] = f'{parsed["title"]} - {parsed["date"].day:02d}.{parsed["date"].month:02d}.{parsed["date"].year:02d}'
-                # part of a compilation
-                audio['cpil'] = True
-                # album
-                audio['\xa9alb'] = 'NTS'
-                # artist
-                join_artists = parsed['artists'] + parsed['parsed_artists']
-                all_artists = []
-                presence_set = set()
-                for aa in join_artists:
-                    al = aa.lower()
-                    if al not in presence_set:
-                        presence_set.add(al)
-                        all_artists.append(aa)
-                # add to output data
-                parsed['all_artists'] = all_artists
-                # add to file metadata
-                audio['\xa9ART'] = "; ".join(all_artists)
-                # year
-                audio['\xa9day'] = f'{parsed["date"].year}'
-                # comment
-                audio['\xa9cmt'] = nts_url
-                # genre
-                if len(parsed['genres']) != 0:
-                    audio['\xa9gen'] = parsed['genres'][0]
-                # cover
-                if image_type != '':
-                    match = re.match(r'jpe?g$', image_type)
-                    img_format = None
-                    if match:
-                        img_format = mutagen.mp4.AtomDataType.JPEG
-                    else:
-                        img_format = mutagen.mp4.AtomDataType.PNG
-                    cover = mutagen.mp4.MP4Cover(image, img_format)
-                    audio['covr'] = [cover]
-                audio.save()
-    return parsed
+        for file in Path(tempdir).glob(f"{file_name}*"):
+            mp_file = mutagen.File(file)
+            build_metadata(mp_file, metadata, quiet=quiet)
+            file.rename(f"{save_dir}/{file.name}")
+            if not quiet:
+                print(f'\nsaved file as: {file}\n')
+    return metadata
 
 
 def parse_nts_data(bs):
@@ -131,8 +100,10 @@ def parse_nts_data(bs):
 
     bg_tag = bs.select('section#bg[style]')
     background_image_regex = r'background-image:url\((.*)\)'
-    image_url = re.match(background_image_regex,
-                         bg_tag[0]['style']).groups()[0]
+    if bg_tag:
+        image_url = re.match(background_image_regex, bg_tag[0]['style']).groups()[0]
+    else:
+        image_url = None
 
     # sometimes it's just the date
     date = title_box.div.div.h2.span.text
@@ -257,43 +228,3 @@ def get_episodes_of_show(show_name):
             break
 
     return output
-
-
-def main():
-    episode_regex = r'.*nts\.live\/shows.+(\/episodes)\/.+'
-    show_regex = r'.*nts\.live\/shows\/([^/]+)$'
-
-    if len(sys.argv) < 2:
-        print("please pass an URL or a file containing a list of urls.")
-        exit(1)
-
-    arg = sys.argv[1]
-    line = arg
-
-    match_episode = re.match(episode_regex, line)
-    match_show = re.match(show_regex, line)
-
-    lines = []
-
-    if match_episode:
-        lines += line.strip()
-    elif match_show:
-        lines += get_episodes_of_show(match_show.group(1))
-
-    if os.path.isfile(arg):
-        # read list
-        file = ""
-        with open(arg, 'r') as f:
-            file = f.read()
-        lines = filter(None, file.split('\n'))
-
-    if len(lines) == 0:
-        print('Didn\'t find shows to download.')
-        exit(1)
-
-    for line in lines:
-        download(line, False, download_dir)
-
-
-if __name__ == "__main__":
-    main()

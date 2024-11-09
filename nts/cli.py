@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 import os
 import re
 import sys
@@ -11,16 +10,17 @@ def main():
     show_regex = r'.*nts\.live\/shows\/([^/]+)$'
 
     # defaults to darwin
-    download_dir = '~/Downloads'
+    #download_dir = '~/Downloads'
+    download_dir = '~/Music/Music/Media.localized/Automatically Add to Music.localized'
     if sys.platform.startswith('win32'):
         download_dir = '%USERPROFILE%\\Downloads\\'
     # expand it
-    download_dir = os.path.expanduser('~/Downloads')
+    download_dir = os.path.expanduser(download_dir)
 
     usage = "Usage: %prog [options] args"
     parser = OptionParser(usage=usage)
     parser.add_option("-o", "--out-dir", dest="output_directory", default=download_dir, action="store", type="string",
-                      help="where the files will be downloaded, defaults to ~/Downloads on macOS and %USERPROFILE%\\Downloads", metavar="DIR")
+                      help="where the files will be downloaded", metavar="DIR")
     parser.add_option("-v", "--version", default=False,
                       dest="version", action="store_true",
                       help="print the version number and quit")
@@ -49,8 +49,7 @@ def main():
             match_sh = re.match(show_regex, url)
 
             if match_ep:
-                nts.download(url=url, quiet=options.quiet,
-                             save_dir=download_dir)
+                nts.download(url=url, quiet=options.quiet, save_dir=download_dir)
             elif match_sh:
                 episodes = nts.get_episodes_of_show(match_sh.group(1))
                 for ep in episodes:
@@ -63,7 +62,6 @@ def main():
     for arg in args:
         if os.path.isfile(arg):
             # check if file
-            file = ""
             with open(arg, 'r') as f:
                 file = f.read()
             lines = filter(None, file.split('\n'))
